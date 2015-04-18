@@ -13,8 +13,10 @@
 #import "MITMobiusRecentSearchQuery.h"
 
 #import "MITMobileServerConfiguration.h"
+#import <objc/runtime.h>
 
 static NSString* const MITMobiusResourcePathPattern = @"resource";
+static void const *MITDataSourceCachedObjectsClearedKey = &MITDataSourceCachedObjectsClearedKey;
 
 @interface MITMobiusResourceDataSource ()
 @property (nonatomic,strong) NSManagedObjectContext *managedObjectContext;
@@ -49,11 +51,60 @@ static NSString* const MITMobiusResourcePathPattern = @"resource";
 
     self = [super init];
     if (self) {
+        [[self class] _clearCachedObjects];
         _managedObjectContext = managedObjectContext;
         _mappingOperationQueue = [[NSOperationQueue alloc] init];
     }
 
     return self;
+}
+
+
++ (void)_clearCachedObjects
+{
+    // This most likely will be a fairly espensive operation
+    // since it involves potentially deleting a large number of
+    // CoreData objects (especially with a number of subclasses)
+    NSBlockOperation *blockOperation = [NSBlockOperation blockOperationWithBlock:^{
+        id firstRunToken = objc_getAssociatedObject(self, MITDataSourceCachedObjectsClearedKey);
+        
+        if (!firstRunToken) {
+            __block NSError *error = nil;
+            BOOL updatePassed = [[MITCoreDataController defaultController] performBackgroundUpdateAndWait:^(NSManagedObjectContext *context, NSError *__autoreleasing *error) {
+                return [self clearCachedObjectsWithManagedObjectContext:context error:error];
+            } error:&error];
+            
+            if (!updatePassed) {
+                DDLogWarn(@"failed to clear cached objects for %@: %@",NSStringFromClass(self),[error localizedDescription]);
+            }
+            
+            objc_setAssociatedObject(self, MITDataSourceCachedObjectsClearedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+    }];
+    
+    [[NSOperationQueue mainQueue] addOperation:blockOperation];
+}
+
++ (BOOL)clearCachedObjectsWithManagedObjectContext:(NSManagedObjectContext*)context error:(NSError**)error
+{
+    NSFetchRequest *fetchRequestForMobiusRoomSet = [[NSFetchRequest alloc] initWithEntityName:@"MobiusRoomSet"];
+    NSFetchRequest *fetchRequestForMobiusResourceType = [[NSFetchRequest alloc] initWithEntityName:@"MobiusResourceType"];
+    
+    NSArray *fetchRequests = @[fetchRequestForMobiusRoomSet, fetchRequestForMobiusResourceType];
+    
+    for (NSFetchRequest *fetchRequest in fetchRequests) {
+        NSArray *result = [context executeFetchRequest:fetchRequest error:error];
+        if (!result) {
+            return NO;
+        }
+        
+        [context performBlock:^{
+            [result enumerateObjectsUsingBlock:^(NSManagedObject *object, NSUInteger idx, BOOL *stop) {
+                [context deleteObject:object];
+            }];
+        }];
+    }
+    return YES;
 }
 
 - (NSArray*)resources
@@ -195,13 +246,38 @@ static NSString* const MITMobiusResourcePathPattern = @"resource";
     } else {
         NSURL *resourceReservations = [MITMobiusResourceDataSource defaultServerURL];
         NSString *urlPath = nil;
+        NSFetchRequest *fetchRequest = nil;
+        
         if (type == MITMobiusQuickSearchRoomSet) {
+            
+            fetchRequest = [[NSFetchRequest alloc] initWithEntityName:@"MobiusRoomSet"];
+
             NSString *encodedString = [@"resourceroomset" urlEncodeUsingEncoding:NSUTF8StringEncoding useFormURLEncoded:YES];
             urlPath = [NSString stringWithFormat:@"/%@?%@",encodedString, @"format=json"];
         } else if (type == MITMobiusQuickSearchResourceType) {
+            
+            fetchRequest = [[NSFetchRequest alloc] initWithEntityName:@"MobiusResourceType"];
+            
             NSString *encodedString = [@"resourcetype" urlEncodeUsingEncoding:NSUTF8StringEncoding useFormURLEncoded:YES];
             urlPath = [NSString stringWithFormat:@"/%@?%@",encodedString, @"format=json"];
-            
+        }
+        
+        //Check if objects are already in cache
+        NSError *error = nil;
+        NSArray *objects = [self.managedObjectContext executeFetchRequest:fetchRequest error:&error];
+        if (error) {
+            if (block) {
+                block(nil,error);
+                return;
+            }
+        }
+        if ([objects count]) {
+            if (block) {
+                [[NSOperationQueue mainQueue] addOperationWithBlock:^{
+                    block(objects,nil);
+                }];
+                return;
+            }
         }
         
         NSURL *resourcesURL = [NSURL URLWithString:urlPath relativeToURL:resourceReservations];
@@ -217,6 +293,7 @@ static NSString* const MITMobiusResourcePathPattern = @"resource";
         } else if (type == MITMobiusQuickSearchRoomSet) {
             mapping = [MITMobiusRoomSet objectMapping];
         }
+        
         RKResponseDescriptor *responseDescriptor = [RKResponseDescriptor responseDescriptorWithMapping:mapping method:RKRequestMethodAny pathPattern:nil keyPath:nil statusCodes:RKStatusCodeIndexSetForClass(RKStatusCodeClassSuccessful)];
         
         RKManagedObjectRequestOperation *requestOperation = [[RKManagedObjectRequestOperation alloc] initWithRequest:request responseDescriptors:@[responseDescriptor]];
