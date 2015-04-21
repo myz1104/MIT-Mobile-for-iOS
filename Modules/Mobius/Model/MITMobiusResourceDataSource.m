@@ -51,7 +51,7 @@ static void const *MITDataSourceCachedObjectsClearedKey = &MITDataSourceCachedOb
 
     self = [super init];
     if (self) {
-        [[self class] _clearCachedObjects];
+        [self clearCachedObjects];
         _managedObjectContext = managedObjectContext;
         _mappingOperationQueue = [[NSOperationQueue alloc] init];
     }
@@ -60,7 +60,7 @@ static void const *MITDataSourceCachedObjectsClearedKey = &MITDataSourceCachedOb
 }
 
 
-+ (void)_clearCachedObjects
+- (void)clearCachedObjects
 {
     // This most likely will be a fairly espensive operation
     // since it involves potentially deleting a large number of
@@ -70,12 +70,11 @@ static void const *MITDataSourceCachedObjectsClearedKey = &MITDataSourceCachedOb
         
         if (!firstRunToken) {
             __block NSError *error = nil;
-            BOOL updatePassed = [[MITCoreDataController defaultController] performBackgroundUpdateAndWait:^(NSManagedObjectContext *context, NSError *__autoreleasing *error) {
-                return [self clearCachedObjectsWithManagedObjectContext:context error:error];
-            } error:&error];
             
+            BOOL updatePassed = [self clearCachedObjectsWithManagedObjectContext:self.managedObjectContext error:nil];
+                        
             if (!updatePassed) {
-                DDLogWarn(@"failed to clear cached objects for %@: %@",NSStringFromClass(self),[error localizedDescription]);
+                DDLogWarn(@"failed to clear cached objects %@",[error localizedDescription]);
             }
             
             objc_setAssociatedObject(self, MITDataSourceCachedObjectsClearedKey, @(YES), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -85,7 +84,7 @@ static void const *MITDataSourceCachedObjectsClearedKey = &MITDataSourceCachedOb
     [[NSOperationQueue mainQueue] addOperation:blockOperation];
 }
 
-+ (BOOL)clearCachedObjectsWithManagedObjectContext:(NSManagedObjectContext*)context error:(NSError**)error
+- (BOOL)clearCachedObjectsWithManagedObjectContext:(NSManagedObjectContext*)context error:(NSError**)error
 {
     NSFetchRequest *fetchRequestForMobiusRoomSet = [[NSFetchRequest alloc] initWithEntityName:@"MobiusRoomSet"];
     NSFetchRequest *fetchRequestForMobiusResourceType = [[NSFetchRequest alloc] initWithEntityName:@"MobiusResourceType"];
